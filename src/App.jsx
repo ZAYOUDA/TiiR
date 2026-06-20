@@ -374,7 +374,7 @@ function FlatMap({ trips }) {
     OCEAN_LABELS.forEach(({ lat, lon, label, size }) => {
       if (!label) return;
       const { x, y } = pr(lat, lon);
-      const fs2 = Math.max(8, Math.round(size * fs * 10));
+      const fs2 = Math.max(6, Math.round(size * fs));
       ctx.save();
       ctx.font = `italic ${fs2}px Georgia, serif`;
       ctx.fillStyle = "rgba(60,100,140,0.6)";
@@ -388,7 +388,7 @@ function FlatMap({ trips }) {
       SEA_LABELS.forEach(({ lat, lon, label, size }) => {
         if (!label) return;
         const { x, y } = pr(lat, lon);
-        const fs2 = Math.max(7, Math.round(size * fs * 10));
+        const fs2 = Math.max(5, Math.round(size * fs));
         ctx.save();
         ctx.font = `italic ${fs2}px Georgia, serif`;
         ctx.fillStyle = "rgba(60,100,140,0.5)";
@@ -401,7 +401,7 @@ function FlatMap({ trips }) {
     // ── Continents ──
     CONTINENT_LABELS.forEach(({ lat, lon, label, size }) => {
       const { x, y } = pr(lat, lon);
-      const fs2 = Math.max(9, Math.round(size * fs * 10));
+      const fs2 = Math.max(7, Math.round(size * fs));
       ctx.save();
       ctx.font = `bold ${fs2}px 'JetBrains Mono', monospace`;
       ctx.fillStyle = "rgba(50,65,40,0.4)";
@@ -470,7 +470,7 @@ function FlatMap({ trips }) {
       ctx.fillStyle = "#18181b"; ctx.fill();
       ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.stroke();
 
-      const labelSize = Math.max(8, Math.round(10 * fs));
+      const labelSize = Math.max(7, Math.round(10 * fs));
       ctx.font = `bold ${labelSize}px 'JetBrains Mono', monospace`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(255,255,255,0.95)";
