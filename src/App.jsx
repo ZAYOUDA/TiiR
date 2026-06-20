@@ -204,22 +204,14 @@ const CITIES = {
   Lille: { lat: 50.6292, lon: 3.0573, country: "France", iata: "LIL" },
 };
 
-// ─── Globe ────────────────────────────────────────────────────────────────────
-function GlobeCanvas({ trips }) {
+// ─── Flat Map ─────────────────────────────────────────────────────────────────
+function FlatMap({ trips }) {
   const canvasRef = useRef(null);
-  const rotRef = useRef({
-    x: 0,
-    y: -1.0,
-    dragging: false,
-    lastX: 0,
-    lastY: 0,
-  });
   const animRef = useRef(null);
   const arcProgressRef = useRef({});
   const timeRef = useRef(0);
   const [landRings, setLandRings] = useState([]);
 
-  // Load Natural Earth 110m land polygons from CDN once
   useEffect(() => {
     fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json")
       .then((r) => r.json())
@@ -227,44 +219,11 @@ function GlobeCanvas({ trips }) {
       .catch(() => {});
   }, []);
 
-  const project = useCallback((lat, lon, cx, cy, radius, rx, ry) => {
-    const phi = (90 - lat) * (Math.PI / 180);
-    const theta = (lon + 180) * (Math.PI / 180);
-    const x3 = radius * Math.sin(phi) * Math.cos(theta);
-    const y3 = -radius * Math.cos(phi);
-    const z3 = radius * Math.sin(phi) * Math.sin(theta);
-    const cosX = Math.cos(rx),
-      sinX = Math.sin(rx);
-    const cosY = Math.cos(ry),
-      sinY = Math.sin(ry);
-    const y2 = y3 * cosX - z3 * sinX;
-    const z2 = y3 * sinX + z3 * cosX;
-    const x2 = x3 * cosY + z2 * sinY;
-    const zf = -x3 * sinY + z2 * cosY;
-    return { x: cx + x2, y: cy + y2, z: zf };
-  }, []);
-
-  const getArcPoint = useCallback((from, to, t, cx, cy, radius, rx, ry) => {
-    const lat = from.lat + (to.lat - from.lat) * t;
-    const lon = from.lon + (to.lon - from.lon) * t;
-    const dist = haversine(from.lat, from.lon, to.lat, to.lon);
-    const arc =
-      Math.sin(t * Math.PI) * 0.22 * Math.min(dist / 5000, 1.2);
-    const phi = (90 - lat) * (Math.PI / 180);
-    const theta = (lon + 180) * (Math.PI / 180);
-    const r = radius * (1 + arc);
-    const x3 = r * Math.sin(phi) * Math.cos(theta);
-    const y3 = -r * Math.cos(phi);
-    const z3 = r * Math.sin(phi) * Math.sin(theta);
-    const cosX = Math.cos(rx),
-      sinX = Math.sin(rx);
-    const cosY = Math.cos(ry),
-      sinY = Math.sin(ry);
-    const y2 = y3 * cosX - z3 * sinX;
-    const z2 = y3 * sinX + z3 * cosX;
-    const x2 = x3 * cosY + z2 * sinY;
-    const zf = -x3 * sinY + z2 * cosY;
-    return { x: cx + x2, y: cy + y2, z: zf };
+  // Equirectangular projection: lon/lat → canvas x/y
+  const project = useCallback((lat, lon, W, H) => {
+    const x = ((lon + 180) / 360) * W;
+    const y = ((90 - lat) / 180) * H;
+    return { x, y };
   }, []);
 
   const draw = useCallback(() => {
@@ -272,232 +231,109 @@ function GlobeCanvas({ trips }) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const dpr = canvas._dpr || 1;
-    const W = canvas.width / dpr,
-      H = canvas.height / dpr;
-    const cx = W / 2,
-      cy = H / 2;
-    const radius = Math.min(W, H) * 0.4;
-    const { x: rx, y: ry } = rotRef.current;
+    const W = canvas.width / dpr;
+    const H = canvas.height / dpr;
     timeRef.current += 0.016;
 
     ctx.clearRect(0, 0, W, H);
 
-    // Background
-    ctx.fillStyle = "#f4f4f5";
+    // Ocean background
+    ctx.fillStyle = "#c8dce8";
     ctx.fillRect(0, 0, W, H);
 
-    // Subtle background dots
-    const starSeed = [
-      [0.12, 0.08],[0.87, 0.15],[0.34, 0.22],[0.91, 0.41],[0.05, 0.55],
-      [0.78, 0.72],[0.22, 0.81],[0.63, 0.09],[0.45, 0.93],[0.97, 0.62],
-      [0.15, 0.35],[0.55, 0.48],[0.73, 0.85],[0.38, 0.67],[0.82, 0.30],
-    ];
-    starSeed.forEach(([sx, sy]) => {
-      const twinkle = 0.15 + 0.12 * Math.sin(timeRef.current * 0.8 + sx * 10);
-      ctx.beginPath();
-      ctx.arc(sx * W, sy * H, 1, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(120,120,130,${twinkle})`;
-      ctx.fill();
-    });
-
-    // Atmosphere outer glow
-    const atmoOuter = ctx.createRadialGradient(
-      cx, cy, radius * 0.9,
-      cx, cy, radius * 1.25
-    );
-    atmoOuter.addColorStop(0, "rgba(100,100,110,0.10)");
-    atmoOuter.addColorStop(0.5, "rgba(100,100,110,0.04)");
-    atmoOuter.addColorStop(1, "rgba(100,100,110,0)");
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius * 1.25, 0, Math.PI * 2);
-    ctx.fillStyle = atmoOuter;
-    ctx.fill();
-
-    // Globe ocean body
-    const globeGrad = ctx.createRadialGradient(
-      cx - radius * 0.25, cy - radius * 0.25, radius * 0.05,
-      cx + radius * 0.1, cy + radius * 0.15, radius * 1.1
-    );
-    globeGrad.addColorStop(0, "#dce8f0");
-    globeGrad.addColorStop(0.5, "#c8dce8");
-    globeGrad.addColorStop(1, "#b0c8d8");
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fillStyle = globeGrad;
-    ctx.fill();
-
-    // ── Land polygons ──────────────────────────────────────────────────────
-    // Clip everything to the globe circle so back-side artifacts are hidden
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius - 0.5, 0, Math.PI * 2);
-    ctx.clip();
-
+    // Land polygons
     landRings.forEach((ring) => {
-      // Project all points; only draw segments where both endpoints face front
-      let anyVisible = false;
-      const pts = ring.map(([lon, lat]) => {
-        const p = project(lat, lon, cx, cy, radius, rx, ry);
-        if (p.z > 0) anyVisible = true;
-        return p;
-      });
-      if (!anyVisible) return;
-
       ctx.beginPath();
-      let pathStarted = false;
-      pts.forEach((p) => {
-        if (p.z > 0) {
-          if (!pathStarted) {
-            ctx.moveTo(p.x, p.y);
-            pathStarted = true;
-          } else {
-            ctx.lineTo(p.x, p.y);
-          }
-        } else {
-          pathStarted = false;
-        }
+      ring.forEach(([lon, lat], i) => {
+        const { x, y } = project(lat, lon, W, H);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       });
-      ctx.fillStyle = "#c8d8c0";
-      ctx.strokeStyle = "#a8b8a0";
-      ctx.lineWidth = 0.4;
+      ctx.closePath();
+      ctx.fillStyle = "#d4dfc8";
       ctx.fill();
+      ctx.strokeStyle = "#b8c8a8";
+      ctx.lineWidth = 0.3;
       ctx.stroke();
     });
 
-    ctx.restore();
-    // ──────────────────────────────────────────────────────────────────────
-
-    // Grid — meridians
-    for (let lon = -180; lon <= 180; lon += 15) {
-      ctx.beginPath();
-      let started = false;
-      for (let lat = -85; lat <= 85; lat += 2) {
-        const p = project(lat, lon, cx, cy, radius, rx, ry);
-        if (p.z > 0) {
-          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-          else ctx.lineTo(p.x, p.y);
-        } else started = false;
-      }
-      ctx.strokeStyle = "rgba(60,80,60,0.12)";
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
+    // Grid
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 0.5;
+    for (let lon = -180; lon <= 180; lon += 30) {
+      const x = ((lon + 180) / 360) * W;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }
-    // Parallels
-    for (let lat = -75; lat <= 75; lat += 15) {
-      ctx.beginPath();
-      let started = false;
-      for (let lon = -180; lon <= 180; lon += 2) {
-        const p = project(lat, lon, cx, cy, radius, rx, ry);
-        if (p.z > 0) {
-          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-          else ctx.lineTo(p.x, p.y);
-        } else started = false;
-      }
-      ctx.strokeStyle =
-        lat === 0 ? "rgba(60,80,60,0.25)" : "rgba(60,80,60,0.12)";
+    for (let lat = -90; lat <= 90; lat += 30) {
+      const y = ((90 - lat) / 180) * H;
+      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.25)";
       ctx.lineWidth = lat === 0 ? 0.8 : 0.5;
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     }
 
-    // Globe rim
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(60,60,70,0.45)";
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
+    // Border
+    ctx.strokeStyle = "rgba(60,60,70,0.3)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0, 0, W, H);
 
-    // Soft depth shading
-    const shade = ctx.createRadialGradient(
-      cx + radius * 0.3, cy + radius * 0.3, radius * 0.2,
-      cx + radius * 0.2, cy + radius * 0.2, radius * 1.05
-    );
-    shade.addColorStop(0, "rgba(0,0,30,0.14)");
-    shade.addColorStop(1, "rgba(0,0,30,0)");
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fillStyle = shade;
-    ctx.fill();
-
-    // ── Arcs ──
+    // ── Flight arcs ──
     trips.forEach((trip, i) => {
       const from = CITIES[trip.from];
       const to = CITIES[trip.to];
       if (!from || !to) return;
       if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
       if (arcProgressRef.current[i] < 1)
-        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.006);
+        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.008);
       const progress = arcProgressRef.current[i];
       const isPlane = trip.type !== "train";
-      const baseColor = isPlane ? "#18181b" : "#71717a";
-      const steps = 80;
-      const maxStep = Math.floor(steps * progress);
 
-      // Trail glow
+      const p1 = project(from.lat, from.lon, W, H);
+      const p2 = project(to.lat, to.lon, W, H);
+
+      // Control point: arc goes upward (toward north = lower y)
+      const mx = (p1.x + p2.x) / 2;
+      const my = (p1.y + p2.y) / 2;
+      const dist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+      const cpx = mx;
+      const cpy = my - dist * 0.35;
+
+      // Draw partial arc up to progress
       ctx.beginPath();
-      let trailStarted = false;
+      const steps = 60;
+      const maxStep = Math.floor(steps * progress);
       for (let s = 0; s <= maxStep; s++) {
-        const p = getArcPoint(from, to, s / steps, cx, cy, radius, rx, ry);
-        if (p.z > -radius * 0.05) {
-          if (!trailStarted) { ctx.moveTo(p.x, p.y); trailStarted = true; }
-          else ctx.lineTo(p.x, p.y);
-        } else trailStarted = false;
+        const t = s / steps;
+        // Quadratic bezier point
+        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
+        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
+        if (s === 0) ctx.moveTo(bx, by);
+        else ctx.lineTo(bx, by);
       }
-      ctx.strokeStyle = isPlane
-        ? "rgba(24,24,27,0.12)"
-        : "rgba(113,113,122,0.12)";
+      ctx.strokeStyle = isPlane ? "rgba(24,24,27,0.15)" : "rgba(100,100,120,0.15)";
       ctx.lineWidth = 5;
       ctx.stroke();
 
-      // Main arc line
       ctx.beginPath();
-      let lineStarted = false;
       for (let s = 0; s <= maxStep; s++) {
-        const p = getArcPoint(from, to, s / steps, cx, cy, radius, rx, ry);
-        if (p.z > -radius * 0.05) {
-          if (!lineStarted) { ctx.moveTo(p.x, p.y); lineStarted = true; }
-          else ctx.lineTo(p.x, p.y);
-        } else lineStarted = false;
+        const t = s / steps;
+        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
+        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
+        if (s === 0) ctx.moveTo(bx, by);
+        else ctx.lineTo(bx, by);
       }
-      ctx.strokeStyle = baseColor;
-      ctx.lineWidth = 1.8;
+      ctx.strokeStyle = isPlane ? "#18181b" : "#71717a";
+      ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      // Animated traveling dot
+      // Traveling dot
       if (progress < 1) {
-        const dp = getArcPoint(from, to, progress, cx, cy, radius, rx, ry);
-        if (dp.z > 0) {
-          ctx.beginPath();
-          ctx.arc(dp.x, dp.y, 3.5, 0, Math.PI * 2);
-          ctx.fillStyle = "#18181b";
-          ctx.fill();
-        }
-      }
-
-      // Arrowhead at destination
-      if (progress >= 0.97) {
-        const p1 = getArcPoint(from, to, 0.95, cx, cy, radius, rx, ry);
-        const p2 = getArcPoint(from, to, 0.995, cx, cy, radius, rx, ry);
-        if (p2.z > 0) {
-          const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-          const aLen = 9;
-          ctx.beginPath();
-          ctx.moveTo(p2.x, p2.y);
-          ctx.lineTo(
-            p2.x - aLen * Math.cos(angle - 0.38),
-            p2.y - aLen * Math.sin(angle - 0.38)
-          );
-          ctx.lineTo(
-            p2.x - aLen * 0.5 * Math.cos(angle),
-            p2.y - aLen * 0.5 * Math.sin(angle)
-          );
-          ctx.lineTo(
-            p2.x - aLen * Math.cos(angle + 0.38),
-            p2.y - aLen * Math.sin(angle + 0.38)
-          );
-          ctx.closePath();
-          ctx.fillStyle = baseColor;
-          ctx.fill();
-        }
+        const t = progress;
+        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
+        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
+        ctx.beginPath();
+        ctx.arc(bx, by, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "#18181b";
+        ctx.fill();
       }
     });
 
@@ -507,37 +343,36 @@ function GlobeCanvas({ trips }) {
     citySet.forEach((name) => {
       const city = CITIES[name];
       if (!city) return;
-      const p = project(city.lat, city.lon, cx, cy, radius, rx, ry);
-      if (p.z > 0) {
-        const pulse = 0.5 + 0.5 * Math.sin(timeRef.current * 2 + city.lat);
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 3.5 + pulse * 3, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(60,60,70,${0.25 * pulse})`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
+      const { x, y } = project(city.lat, city.lon, W, H);
+      const pulse = 0.5 + 0.5 * Math.sin(timeRef.current * 2 + city.lat);
 
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.8, 0, Math.PI * 2);
-        ctx.fillStyle = "#18181b";
-        ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x, y, 3 + pulse * 2.5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(24,24,27,${0.2 * pulse})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
 
-        ctx.font = "bold 9px 'JetBrains Mono', monospace";
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.strokeText(city.iata, p.x + 5, p.y - 4);
-        ctx.fillStyle = "#18181b";
-        ctx.fillText(city.iata, p.x + 5, p.y - 4);
-      }
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#18181b";
+      ctx.fill();
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.font = "bold 9px 'JetBrains Mono', monospace";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.strokeText(city.iata, x + 5, y - 4);
+      ctx.fillStyle = "#18181b";
+      ctx.fillText(city.iata, x + 5, y - 4);
     });
-  }, [trips, project, getArcPoint, landRings]);
+  }, [trips, project, landRings]);
 
-  useEffect(() => {
-    arcProgressRef.current = {};
-  }, [trips.length]);
+  useEffect(() => { arcProgressRef.current = {}; }, [trips.length]);
 
   useEffect(() => {
     const loop = () => {
-      if (!rotRef.current.dragging) rotRef.current.y += 0.0015;
       draw();
       animRef.current = requestAnimationFrame(loop);
     };
@@ -557,8 +392,7 @@ function GlobeCanvas({ trips }) {
       c.height = cssH * dpr;
       c.style.width = cssW + "px";
       c.style.height = cssH + "px";
-      const ctx = c.getContext("2d");
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize();
     window.addEventListener("resize", resize);
@@ -566,49 +400,10 @@ function GlobeCanvas({ trips }) {
     return () => { window.removeEventListener("resize", resize); clearTimeout(t); };
   }, []);
 
-  useEffect(() => {
-    const c = canvasRef.current;
-    if (!c) return;
-    const down = (e) => {
-      rotRef.current.dragging = true;
-      rotRef.current.lastX = e.clientX ?? e.touches?.[0]?.clientX;
-      rotRef.current.lastY = e.clientY ?? e.touches?.[0]?.clientY;
-    };
-    const move = (e) => {
-      if (!rotRef.current.dragging) return;
-      if (e.cancelable && e.touches) e.preventDefault();
-      const x = e.clientX ?? e.touches?.[0]?.clientX;
-      const y = e.clientY ?? e.touches?.[0]?.clientY;
-      rotRef.current.y += (x - rotRef.current.lastX) * 0.005;
-      rotRef.current.x += (y - rotRef.current.lastY) * 0.005;
-      rotRef.current.x = Math.max(-1.2, Math.min(1.2, rotRef.current.x));
-      rotRef.current.lastX = x;
-      rotRef.current.lastY = y;
-    };
-    const up = () => { rotRef.current.dragging = false; };
-    c.addEventListener("mousedown", down);
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    c.addEventListener("touchstart", down, { passive: true });
-    window.addEventListener("touchmove", move, { passive: false });
-    window.addEventListener("touchend", up);
-    return () => {
-      c.removeEventListener("mousedown", down);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-  }, []);
-
   return (
     <canvas
       ref={canvasRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        cursor: "grab",
-        display: "block",
-        touchAction: "none",
-      }}
+      style={{ width: "100%", height: "100%", display: "block" }}
     />
   );
 }
@@ -910,7 +705,7 @@ export default function App() {
         {/* Globe */}
         {tab === "globe" && (
           <div className="card-in" style={{ flex: 1, minHeight: 340, height: "60vw", maxHeight: 500, background: "rgba(24,24,27,0.02)", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden", position: "relative" }}>
-            <GlobeCanvas trips={trips} />
+            <FlatMap trips={trips} />
             <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 12, fontSize: 8, color: "#a8a8b0", letterSpacing: 1 }}>
               <span>GLISSE</span>
               <span style={{ color: "#18181b" }}>▬ VOL</span>
