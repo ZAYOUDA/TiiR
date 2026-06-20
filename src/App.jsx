@@ -811,9 +811,20 @@ function FlatMap({ trips }) {
         applyZoom(newZoom, cx, cy);
       }
     };
+    let lastTap = 0;
     const onTouchEnd = (e) => {
       if (e.touches.length < 2) pinchRef.current = null;
-      if (e.touches.length === 0) dragRef.current = null;
+      if (e.touches.length === 0) {
+        dragRef.current = null;
+        // Double-tap → reset zoom
+        const now = Date.now();
+        if (now - lastTap < 300) {
+          zoomRef.current = 1;
+          panXRef.current = 0;
+          panYRef.current = 0;
+        }
+        lastTap = now;
+      }
     };
     canvas.addEventListener("touchstart", onTouchStart, { passive: true });
     canvas.addEventListener("touchmove", onTouchMove, { passive: false });
@@ -1129,14 +1140,14 @@ export default function App() {
 
         {/* Globe */}
         {tab === "globe" && (
-          <div className="card-in" style={{ width: "100%", flex: 1, minHeight: 0, position: "relative", background: "#e8edf2", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden" }}>
+          <div className="card-in" style={{ width: "100%", aspectRatio: "2 / 1", minHeight: 160, maxHeight: "calc(100vh - 260px)", position: "relative", background: "#b8d0e0", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden" }}>
             <FlatMap trips={trips} />
             <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 12, fontSize: 8, color: "#a8a8b0", letterSpacing: 1, pointerEvents: "none" }}>
               <span style={{ color: "#18181b" }}>▬ VOL</span>
               <span style={{ color: "#71717a" }}>▬ TRAIN</span>
             </div>
-            <div style={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", gap: 4, pointerEvents: "none" }}>
-              <div style={{ background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "3px 6px", fontSize: 8, color: "#71717a", letterSpacing: 1 }}>⊕ pinch / scroll</div>
+            <div style={{ position: "absolute", top: 8, right: 8, pointerEvents: "none" }}>
+              <div style={{ background: "rgba(255,255,255,0.55)", borderRadius: 4, padding: "3px 7px", fontSize: 8, color: "#71717a", letterSpacing: 1 }}>scroll · pinch · double-tap=reset</div>
             </div>
           </div>
         )}
