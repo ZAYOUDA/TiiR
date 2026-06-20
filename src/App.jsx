@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 
 // ─── Great circle interpolation ──────────────────────────────────────────────
 function greatCirclePoints(lat1, lon1, lat2, lon2, steps = 80) {
@@ -451,431 +453,105 @@ function decodeCountries(topo) {
   return extract(topo.objects.countries);
 }
 
-// ─── Flat Map ─────────────────────────────────────────────────────────────────
+// ─── Flat Map (Leaflet) ───────────────────────────────────────────────────────
 function FlatMap({ trips }) {
-  const canvasRef = useRef(null);
-  const animRef = useRef(null);
-  const arcProgressRef = useRef({});
-  const timeRef = useRef(0);
-  const [landRings, setLandRings] = useState([]);
-  const [countryRings, setCountryRings] = useState([]);
+  const divRef = useRef(null);
+  const mapRef = useRef(null);
+  const layersRef = useRef([]);
 
-  // Zoom / pan state (refs to avoid re-render)
-  const zoomRef = useRef(1);
-  const panXRef = useRef(0);
-  const panYRef = useRef(0);
-  const dragRef = useRef(null); // { startX, startY, startPanX, startPanY }
-  const pinchRef = useRef(null); // { dist, zoom, panX, panY }
-
+  // Init Leaflet map
   useEffect(() => {
-    fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json")
-      .then(r => r.json()).then(topo => setLandRings(decodeTopo(topo))).catch(() => {});
-    fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json")
-      .then(r => r.json()).then(topo => setCountryRings(decodeCountries(topo))).catch(() => {});
+    if (mapRef.current || !divRef.current) return;
+
+    const map = L.map(divRef.current, {
+      center: [25, 10],
+      zoom: 2,
+      minZoom: 1,
+      maxZoom: 18,
+      worldCopyJump: true,
+      zoomControl: true,
+    });
+
+    // Tuiles CartoDB Positron — carte claire et épurée
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+      subdomains: "abcd",
+      maxZoom: 19,
+    }).addTo(map);
+
+    mapRef.current = map;
+    return () => { map.remove(); mapRef.current = null; };
   }, []);
 
-  // Base map bounds at zoom=1 (2:1 ratio, fills canvas)
-  const getBaseBounds = useCallback((W, H) => {
-    const mapW = Math.min(W, H * 2);
-    const mapH = mapW / 2;
-    const ox = (W - mapW) / 2;
-    const oy = (H - mapH) / 2;
-    return { mapW, mapH, ox, oy };
-  }, []);
+  // Mettre à jour arcs + marqueurs quand trips change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
 
-  // Zoomed bounds
-  const getMapBounds = useCallback((W, H) => {
-    const { mapW: bW, mapH: bH, ox: bOx, oy: bOy } = getBaseBounds(W, H);
-    const z = zoomRef.current;
-    const mapW = bW * z;
-    const mapH = bH * z;
-    const ox = bOx + (bW - mapW) / 2 + panXRef.current;
-    const oy = bOy + (bH - mapH) / 2 + panYRef.current;
-    return { mapW, mapH, ox, oy };
-  }, [getBaseBounds]);
+    // Supprimer anciens layers
+    layersRef.current.forEach(l => { try { map.removeLayer(l); } catch {} });
+    layersRef.current = [];
 
-  const project = useCallback((lat, lon, mapW, mapH, ox, oy) => {
-    const x = ox + ((lon + 180) / 360) * mapW;
-    const y = oy + ((90 - lat) / 180) * mapH;
-    return { x, y };
-  }, []);
+    const cityMap = new Map();
 
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const dpr = canvas._dpr || 1;
-    const W = canvas.width / dpr;
-    const H = canvas.height / dpr;
-    timeRef.current += 0.016;
-
-    const { mapW, mapH, ox, oy } = getMapBounds(W, H);
-    const isMobile = W < 500;
-    const pr = (lat, lon) => project(lat, lon, mapW, mapH, ox, oy);
-
-    // Background
-    ctx.fillStyle = "#e8edf2";
-    ctx.fillRect(0, 0, W, H);
-
-    // Ocean (clipped to canvas)
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, W, H);
-    ctx.clip();
-    ctx.fillStyle = "#b8d0e0";
-    ctx.fillRect(ox, oy, mapW, mapH);
-
-    // Land
-    landRings.forEach(ring => {
-      ctx.beginPath();
-      ring.forEach(([lon, lat], i) => {
-        const { x, y } = pr(lat, lon);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      });
-      ctx.closePath();
-      ctx.fillStyle = "#dde8cc";
-      ctx.fill();
-    });
-
-    // Country borders
-    countryRings.forEach(ring => {
-      ctx.beginPath();
-      ring.forEach(([lon, lat], i) => {
-        const { x, y } = pr(lat, lon);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      });
-      ctx.strokeStyle = "rgba(150,165,130,0.8)";
-      ctx.lineWidth = 0.5 / zoomRef.current;
-      ctx.stroke();
-    });
-
-    // Grid
-    for (let lon = -180; lon <= 180; lon += 30) {
-      const { x } = pr(0, lon);
-      ctx.beginPath(); ctx.moveTo(x, oy); ctx.lineTo(x, oy + mapH);
-      ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 0.5; ctx.stroke();
-    }
-    for (let lat = -60; lat <= 90; lat += 30) {
-      const { y } = pr(lat, 0);
-      ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + mapW, y);
-      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.2)";
-      ctx.lineWidth = lat === 0 ? 1 : 0.5; ctx.stroke();
-    }
-    [23.5, -23.5].forEach(lat => {
-      const { y } = pr(lat, 0);
-      ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + mapW, y);
-      ctx.strokeStyle = "rgba(200,175,90,0.3)"; ctx.lineWidth = 0.8;
-      ctx.setLineDash([5, 7]); ctx.stroke(); ctx.setLineDash([]);
-    });
-
-    // ── Labels (taille adaptée au zoom) ──
-    const fs = mapW / 900;
-
-    OCEAN_LABELS.forEach(({ lat, lon, label, size }) => {
-      if (!label) return;
-      const { x, y } = pr(lat, lon);
-      if (x < -50 || x > W + 50 || y < -20 || y > H + 20) return;
-      const fs2 = Math.max(6, Math.round(size * fs));
-      ctx.save();
-      ctx.font = `italic ${fs2}px Georgia, serif`;
-      ctx.fillStyle = "rgba(60,100,140,0.6)";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(label, x, y);
-      ctx.restore();
-    });
-
-    if (!isMobile || zoomRef.current > 1.5) {
-      SEA_LABELS.forEach(({ lat, lon, label, size }) => {
-        if (!label) return;
-        const { x, y } = pr(lat, lon);
-        if (x < -50 || x > W + 50 || y < -20 || y > H + 20) return;
-        const fs2 = Math.max(5, Math.round(size * fs));
-        ctx.save();
-        ctx.font = `italic ${fs2}px Georgia, serif`;
-        ctx.fillStyle = "rgba(60,100,140,0.5)";
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(label, x, y);
-        ctx.restore();
-      });
-    }
-
-    CONTINENT_LABELS.forEach(({ lat, lon, label, size }) => {
-      const { x, y } = pr(lat, lon);
-      if (x < -80 || x > W + 80 || y < -30 || y > H + 30) return;
-      const fs2 = Math.max(7, Math.round(size * fs));
-      ctx.save();
-      ctx.font = `bold ${fs2}px 'JetBrains Mono', monospace`;
-      ctx.fillStyle = "rgba(50,65,40,0.4)";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(label, x, y);
-      ctx.restore();
-    });
-
-    // ── Arcs de vol (grande-cercle) ──
-    trips.forEach((trip, i) => {
+    trips.forEach(trip => {
       const from = CITIES[trip.from];
-      const to = CITIES[trip.to];
+      const to   = CITIES[trip.to];
       if (!from || !to) return;
+      cityMap.set(trip.from, from);
+      cityMap.set(trip.to, to);
 
-      // Animation : nouvelle trajectoire part de 0, existante part de 1
-      if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
-      if (arcProgressRef.current[i] < 1)
-        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.025);
-      const progress = arcProgressRef.current[i];
+      // Grande-cercle avec correction antimeridien
+      const pts = greatCirclePoints(from.lat, from.lon, to.lat, to.lon, 80);
+      const adjusted = [pts[0]];
+      for (let i = 1; i < pts.length; i++) {
+        let lon = pts[i].lon;
+        const prev = adjusted[i - 1].lon;
+        while (lon - prev >  180) lon -= 360;
+        while (lon - prev < -180) lon += 360;
+        adjusted.push({ lat: pts[i].lat, lon });
+      }
 
+      const latlngs = adjusted.map(p => [p.lat, p.lon]);
       const isPlane = trip.type !== "train";
-      const gcPts = greatCirclePoints(from.lat, from.lon, to.lat, to.lon, 80);
-      const maxIdx = Math.floor((gcPts.length - 1) * progress);
 
-      const drawSegments = (lw, color) => {
-        let drawing = false;
-        ctx.beginPath();
-        for (let s = 0; s <= maxIdx; s++) {
-          const { x, y } = pr(gcPts[s].lat, gcPts[s].lon);
-          if (s > 0 && Math.abs(gcPts[s].lon - gcPts[s-1].lon) > 180) {
-            ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
-            ctx.beginPath(); drawing = false;
-          }
-          if (!drawing) { ctx.moveTo(x, y); drawing = true; }
-          else ctx.lineTo(x, y);
-        }
-        ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
-      };
+      const line = L.polyline(latlngs, {
+        color: isPlane ? "#e03030" : "#7c3aed",
+        weight: 2.5,
+        opacity: 0.85,
+        smoothFactor: 1,
+      }).addTo(map);
 
-      // Ombre
-      drawSegments(isPlane ? 4 : 3, isPlane ? "rgba(24,24,27,0.08)" : "rgba(100,80,180,0.08)");
-      // Ligne principale
-      drawSegments(isPlane ? 2 : 1.5, isPlane ? "rgba(24,24,27,0.75)" : "rgba(100,80,180,0.7)");
-
-      // Point avion en cours d'animation
-      if (progress < 1) {
-        const { x, y } = pr(gcPts[maxIdx].lat, gcPts[maxIdx].lon);
-        ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = isPlane ? "#18181b" : "#6450b4"; ctx.fill();
-        ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke();
-      }
+      layersRef.current.push(line);
     });
 
-    // ── Villes ──
-    const citySet = new Set();
-    trips.forEach(t => { citySet.add(t.from); citySet.add(t.to); });
-    citySet.forEach(name => {
-      const city = CITIES[name];
-      if (!city) return;
-      const { x, y } = pr(city.lat, city.lon);
-      const pulse = 0.5 + 0.5 * Math.sin(timeRef.current * 2 + city.lat);
+    // Marqueurs de villes
+    cityMap.forEach((city, name) => {
+      const dot = L.circleMarker([city.lat, city.lon], {
+        radius: 5,
+        fillColor: "#18181b",
+        color: "#ffffff",
+        weight: 2,
+        fillOpacity: 1,
+      }).addTo(map);
 
-      ctx.beginPath();
-      ctx.arc(x, y, 3 + pulse * 2, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(24,24,27,${0.18 * pulse})`; ctx.lineWidth = 1; ctx.stroke();
+      const icon = L.divIcon({
+        className: "",
+        html: `<span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#18181b;text-shadow:0 0 4px #fff,0 0 4px #fff,0 0 4px #fff;padding-left:9px;white-space:nowrap">${city.iata}</span>`,
+        iconSize: [0, 0],
+        iconAnchor: [0, 6],
+      });
+      const label = L.marker([city.lat, city.lon], { icon, interactive: false }).addTo(map);
 
-      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = "#18181b"; ctx.fill();
-      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.stroke();
-
-      const labelSize = Math.max(7, Math.round(10 * fs));
-      ctx.font = `bold ${labelSize}px 'JetBrains Mono', monospace`;
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(255,255,255,0.95)";
-      ctx.strokeText(city.iata, x + 5, y - 4);
-      ctx.fillStyle = "#18181b";
-      ctx.fillText(city.iata, x + 5, y - 4);
+      layersRef.current.push(dot, label);
     });
-
-    ctx.restore();
-
-    // Bordure
-    ctx.strokeStyle = "rgba(60,80,100,0.2)"; ctx.lineWidth = 1;
-    ctx.strokeRect(ox, oy, mapW, mapH);
-  }, [trips, project, getMapBounds, landRings, countryRings]);
-
-  const prevLenRef = useRef(0);
-  useEffect(() => {
-    const prevLen = prevLenRef.current;
-    // Complete existing arcs instantly, animate only newly added ones
-    trips.forEach((_, i) => {
-      if (i < prevLen) arcProgressRef.current[i] = 1;
-      else if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
-    });
-    prevLenRef.current = trips.length;
-  }, [trips.length]);
-
-  // Animation loop
-  useEffect(() => {
-    const loop = () => {
-      draw();
-      animRef.current = requestAnimationFrame(loop);
-    };
-    animRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animRef.current);
-  }, [draw]);
-
-  // Resize
-  useEffect(() => {
-    const resize = () => {
-      const c = canvasRef.current;
-      if (!c) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const cssW = c.parentElement.clientWidth;
-      const cssH = c.parentElement.clientHeight;
-      c._dpr = dpr;
-      c.width = cssW * dpr;
-      c.height = cssH * dpr;
-      c.style.width = cssW + "px";
-      c.style.height = cssH + "px";
-      c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-    resize();
-    window.addEventListener("resize", resize);
-    const t = setTimeout(resize, 200);
-    return () => { window.removeEventListener("resize", resize); clearTimeout(t); };
-  }, []);
-
-  // Zoom helper (zoom toward a point cx,cy in canvas coords)
-  const applyZoom = useCallback((newZoom, cx, cy) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = canvas._dpr || 1;
-    const W = canvas.width / dpr;
-    const H = canvas.height / dpr;
-    const { mapW: bW, mapH: bH, ox: bOx, oy: bOy } = (() => {
-      const mapW = Math.min(W, H * 2);
-      const mapH = mapW / 2;
-      return { mapW, mapH, ox: (W - mapW) / 2, oy: (H - mapH) / 2 };
-    })();
-
-    const oldZ = zoomRef.current;
-    const clampedZ = Math.max(1, Math.min(20, newZoom));
-    // Adjust pan so the point under cursor stays fixed
-    const scale = clampedZ / oldZ;
-    panXRef.current = cx - bOx - bW / 2 - (cx - bOx - bW / 2 - panXRef.current) * scale;
-    panYRef.current = cy - bOy - bH / 2 - (cy - bOy - bH / 2 - panYRef.current) * scale;
-    zoomRef.current = clampedZ;
-    clampPan(W, H, clampedZ, bW, bH);
-  }, []);
-
-  const clampPan = (W, H, z, bW, bH) => {
-    const maxPanX = (bW * (z - 1)) / 2;
-    const maxPanY = (bH * (z - 1)) / 2;
-    panXRef.current = Math.max(-maxPanX, Math.min(maxPanX, panXRef.current));
-    panYRef.current = Math.max(-maxPanY, Math.min(maxPanY, panYRef.current));
-  };
-
-  // Mouse wheel zoom
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const onWheel = (e) => {
-      e.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      const cy = e.clientY - rect.top;
-      const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      applyZoom(zoomRef.current * delta, cx, cy);
-    };
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
-  }, [applyZoom]);
-
-  // Mouse drag
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const onDown = (e) => {
-      dragRef.current = { startX: e.clientX, startY: e.clientY, startPanX: panXRef.current, startPanY: panYRef.current };
-      canvas.style.cursor = "grabbing";
-    };
-    const onMove = (e) => {
-      if (!dragRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      const dpr = canvas._dpr || 1;
-      const W = canvas.width / dpr;
-      const H = canvas.height / dpr;
-      const bW = Math.min(W, H * 2);
-      const bH = bW / 2;
-      panXRef.current = dragRef.current.startPanX + dx;
-      panYRef.current = dragRef.current.startPanY + dy;
-      clampPan(W, H, zoomRef.current, bW, bH);
-    };
-    const onUp = () => { dragRef.current = null; canvas.style.cursor = "grab"; };
-    canvas.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    canvas.style.cursor = "grab";
-    return () => {
-      canvas.removeEventListener("mousedown", onDown);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, []);
-
-  // Touch: drag + pinch
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dist2 = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    const onTouchStart = (e) => {
-      if (e.touches.length === 1) {
-        dragRef.current = { startX: e.touches[0].clientX, startY: e.touches[0].clientY, startPanX: panXRef.current, startPanY: panYRef.current };
-        pinchRef.current = null;
-      } else if (e.touches.length === 2) {
-        dragRef.current = null;
-        pinchRef.current = { dist: dist2(e.touches[0], e.touches[1]), zoom: zoomRef.current, panX: panXRef.current, panY: panYRef.current };
-      }
-    };
-    const onTouchMove = (e) => {
-      e.preventDefault();
-      const dpr = canvas._dpr || 1;
-      const W = canvas.width / dpr;
-      const H = canvas.height / dpr;
-      const bW = Math.min(W, H * 2);
-      const bH = bW / 2;
-      if (e.touches.length === 1 && dragRef.current) {
-        const dx = e.touches[0].clientX - dragRef.current.startX;
-        const dy = e.touches[0].clientY - dragRef.current.startY;
-        panXRef.current = dragRef.current.startPanX + dx;
-        panYRef.current = dragRef.current.startPanY + dy;
-        clampPan(W, H, zoomRef.current, bW, bH);
-      } else if (e.touches.length === 2 && pinchRef.current) {
-        const newDist = dist2(e.touches[0], e.touches[1]);
-        const scale = newDist / pinchRef.current.dist;
-        const newZoom = Math.max(1, Math.min(20, pinchRef.current.zoom * scale));
-        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - canvas.getBoundingClientRect().left;
-        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - canvas.getBoundingClientRect().top;
-        applyZoom(newZoom, cx, cy);
-      }
-    };
-    let lastTap = 0;
-    const onTouchEnd = (e) => {
-      if (e.touches.length < 2) pinchRef.current = null;
-      if (e.touches.length === 0) {
-        dragRef.current = null;
-        // Double-tap → reset zoom
-        const now = Date.now();
-        if (now - lastTap < 300) {
-          zoomRef.current = 1;
-          panXRef.current = 0;
-          panYRef.current = 0;
-        }
-        lastTap = now;
-      }
-    };
-    canvas.addEventListener("touchstart", onTouchStart, { passive: true });
-    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
-    canvas.addEventListener("touchend", onTouchEnd, { passive: true });
-    return () => {
-      canvas.removeEventListener("touchstart", onTouchStart);
-      canvas.removeEventListener("touchmove", onTouchMove);
-      canvas.removeEventListener("touchend", onTouchEnd);
-    };
-  }, [applyZoom]);
+  }, [trips]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: "100%", height: "100%", display: "block" }}
-    />
+    <>
+      <style>{`.leaflet-container{font-family:inherit}.leaflet-control-attribution{font-size:9px;opacity:0.6}`}</style>
+      <div ref={divRef} style={{ width: "100%", height: "100%" }} />
+    </>
   );
 }
 
