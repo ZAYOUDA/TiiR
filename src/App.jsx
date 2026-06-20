@@ -1,5 +1,28 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
+// ─── Great circle interpolation ──────────────────────────────────────────────
+function greatCirclePoints(lat1, lon1, lat2, lon2, steps = 80) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => r * 180 / Math.PI;
+  const φ1 = toRad(lat1), λ1 = toRad(lon1);
+  const φ2 = toRad(lat2), λ2 = toRad(lon2);
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((φ2 - φ1) / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin((λ2 - λ1) / 2) ** 2
+  ));
+  if (d < 0.0001) return [{ lat: lat1, lon: lon1 }];
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const A = Math.sin((1 - t) * d) / Math.sin(d);
+    const B = Math.sin(t * d) / Math.sin(d);
+    const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+    const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+    const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+    pts.push({ lat: toDeg(Math.atan2(z, Math.sqrt(x * x + y * y))), lon: toDeg(Math.atan2(y, x)) });
+  }
+  return pts;
+}
+
 // ─── Haversine ────────────────────────────────────────────────────────────────
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -376,13 +399,14 @@ const CONTINENT_LABELS = [
 ];
 
 const OCEAN_LABELS = [
-  { lat: 5,   lon: -170, label: "OCÉAN PACIFIQUE",   size: 13 },
-  { lat: -30, lon: -130, label: "Pacifique Sud",      size: 9  },
-  { lat: 5,   lon: -28,  label: "OCÉAN ATLANTIQUE",  size: 11 },
+  { lat: 30,  lon: -150, label: "OCÉAN PACIFIQUE",   size: 13 },
+  { lat: -20, lon: -120, label: "Pacifique Sud",      size: 9  },
+  { lat: 160, lon: 175,  label: "Pacifique Ouest",    size: 8  },
+  { lat: 10,  lon: -28,  label: "OCÉAN ATLANTIQUE",  size: 11 },
   { lat: -30, lon: -15,  label: "Atlantique Sud",     size: 9  },
-  { lat: -25, lon: 76,   label: "OCÉAN INDIEN",      size: 11 },
+  { lat: -20, lon: 76,   label: "OCÉAN INDIEN",      size: 11 },
   { lat: 83,  lon: 0,    label: "OCÉAN ARCTIQUE",    size: 9  },
-  { lat: -58, lon: 30,   label: "OCÉAN AUSTRAL",     size: 9  },
+  { lat: -58, lon: 40,   label: "OCÉAN AUSTRAL",     size: 9  },
 ];
 
 const SEA_LABELS = [
@@ -587,45 +611,45 @@ function FlatMap({ trips }) {
       ctx.restore();
     });
 
-    // ── Arcs de vol ──
+    // ── Arcs de vol (grande-cercle) ──
     trips.forEach((trip, i) => {
       const from = CITIES[trip.from];
       const to = CITIES[trip.to];
       if (!from || !to) return;
       if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
       if (arcProgressRef.current[i] < 1)
-        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.008);
+        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.006);
       const progress = arcProgressRef.current[i];
       const isPlane = trip.type !== "train";
 
-      const p1 = pr(from.lat, from.lon);
-      const p2 = pr(to.lat, to.lon);
-      const mx = (p1.x + p2.x) / 2;
-      const my = (p1.y + p2.y) / 2;
-      const dist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
-      const cpx = mx;
-      const cpy = my - dist * 0.4;
+      const gcPts = greatCirclePoints(from.lat, from.lon, to.lat, to.lon, 80);
+      const maxIdx = Math.floor(gcPts.length * progress);
 
-      const steps = 60;
-      const maxStep = Math.floor(steps * progress);
-      const drawCurve = (lw, color) => {
+      const drawGC = (lw, color) => {
         ctx.beginPath();
-        for (let s = 0; s <= maxStep; s++) {
-          const t = s / steps;
-          const bx = (1-t)**2*p1.x + 2*(1-t)*t*cpx + t**2*p2.x;
-          const by = (1-t)**2*p1.y + 2*(1-t)*t*cpy + t**2*p2.y;
-          if (s === 0) ctx.moveTo(bx, by); else ctx.lineTo(bx, by);
+        let started = false;
+        for (let s = 0; s <= maxIdx && s < gcPts.length; s++) {
+          const { x, y } = pr(gcPts[s].lat, gcPts[s].lon);
+          // Break line if longitude wraps around the dateline
+          if (s > 0) {
+            const prevLon = gcPts[s - 1].lon;
+            if (Math.abs(gcPts[s].lon - prevLon) > 180) {
+              ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+              ctx.beginPath(); started = false;
+            }
+          }
+          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
         }
         ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
       };
-      drawCurve(5, isPlane ? "rgba(24,24,27,0.12)" : "rgba(100,100,120,0.12)");
-      drawCurve(1.8, isPlane ? "#18181b" : "#71717a");
 
-      if (progress < 1) {
-        const t = progress;
-        const bx = (1-t)**2*p1.x + 2*(1-t)*t*cpx + t**2*p2.x;
-        const by = (1-t)**2*p1.y + 2*(1-t)*t*cpy + t**2*p2.y;
-        ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI * 2);
+      drawGC(5, isPlane ? "rgba(24,24,27,0.1)" : "rgba(100,100,120,0.1)");
+      drawGC(1.8, isPlane ? "#18181b" : "#71717a");
+
+      // Plane dot animation
+      if (progress < 1 && maxIdx < gcPts.length) {
+        const { x, y } = pr(gcPts[maxIdx].lat, gcPts[maxIdx].lon);
+        ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
         ctx.fillStyle = "#18181b"; ctx.fill();
       }
     });
