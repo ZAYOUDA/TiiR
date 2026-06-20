@@ -204,6 +204,69 @@ const CITIES = {
   Lille: { lat: 50.6292, lon: 3.0573, country: "France", iata: "LIL" },
 };
 
+// ─── Labels géographiques ─────────────────────────────────────────────────────
+const CONTINENT_LABELS = [
+  { lat: 5,   lon: 20,   label: "AFRIQUE",          size: 13 },
+  { lat: 52,  lon: 12,   label: "EUROPE",            size: 11 },
+  { lat: 45,  lon: 88,   label: "ASIE",              size: 15 },
+  { lat: 50,  lon: -98,  label: "AMÉRIQUE DU NORD",  size: 11 },
+  { lat: -15, lon: -56,  label: "AMÉRIQUE DU SUD",   size: 11 },
+  { lat: -25, lon: 133,  label: "AUSTRALIE",         size: 11 },
+  { lat: -82, lon: 0,    label: "ANTARCTIQUE",        size: 10 },
+];
+
+const OCEAN_LABELS = [
+  { lat: 5,   lon: -170, label: "OCÉAN PACIFIQUE",   size: 13 },
+  { lat: -30, lon: -130, label: "Pacifique Sud",      size: 9  },
+  { lat: 5,   lon: -28,  label: "OCÉAN ATLANTIQUE",  size: 11 },
+  { lat: -30, lon: -15,  label: "Atlantique Sud",     size: 9  },
+  { lat: -25, lon: 76,   label: "OCÉAN INDIEN",      size: 11 },
+  { lat: 83,  lon: 0,    label: "OCÉAN ARCTIQUE",    size: 9  },
+  { lat: -58, lon: 30,   label: "OCÉAN AUSTRAL",     size: 9  },
+];
+
+const SEA_LABELS = [
+  { lat: 36,  lon: 17,   label: "Mer Méditerranée",  size: 7.5 },
+  { lat: 20,  lon: 38,   label: "Mer Rouge",          size: 7  },
+  { lat: 56,  lon: 4,    label: "Mer du Nord",        size: 7  },
+  { lat: 43,  lon: 33,   label: "Mer Noire",          size: 7  },
+  { lat: 59,  lon: 21,   label: "Mer Baltique",       size: 6.5 },
+  { lat: 26,  lon: 52,   label: "Golfe Persique",     size: 6.5 },
+  { lat: 25,  lon: -90,  label: "Golfe du Mexique",   size: 7  },
+  { lat: 15,  lon: -74,  label: "Mer des Caraïbes",   size: 7  },
+  { lat: 13,  lon: 115,  label: "Mer de Chine",       size: 7  },
+  { lat: 15,  lon: 85,   label: "Golfe du Bengale",   size: 7  },
+  { lat: 64,  lon: -20,  label: "Mer du Groenland",   size: 6.5 },
+  { lat: 70,  lon: 42,   label: "Mer de Barents",     size: 6.5 },
+  { lat: 37,  lon: 25,   label: "Mer Égée",           size: 6  },
+  { lat: 42,  lon: 15,   label: "Mer Adriatique",     size: 6  },
+  { lat: 40,  lon: 22,   label: "",                    size: 6  }, // placeholder
+  { lat: 30,  lon: 32,   label: "Canal de Suez",      size: 6  },
+  { lat: 12,  lon: 50,   label: "Golfe d'Aden",       size: 6.5 },
+  { lat: 8,   lon: -5,   label: "Golfe de Guinée",    size: 6.5 },
+];
+
+// Decode country borders from topojson
+function decodeCountries(topo) {
+  const { arcs: rawArcs, transform } = topo;
+  const [kx, ky] = transform.scale;
+  const [dx, dy] = transform.translate;
+  const arcs = rawArcs.map(arc => {
+    let x = 0, y = 0;
+    return arc.map(p => { x += p[0]; y += p[1]; return [x * kx + dx, y * ky + dy]; });
+  });
+  const getArc = i => { const a = arcs[i < 0 ? ~i : i]; return i < 0 ? [...a].reverse() : a; };
+  const makeRing = ids => { const pts = []; for (const id of ids) { const a = getArc(id); pts.push(...(pts.length ? a.slice(1) : a)); } return pts; };
+  const extract = geom => {
+    if (!geom) return [];
+    if (geom.type === 'Polygon') return geom.arcs.map(makeRing);
+    if (geom.type === 'MultiPolygon') return geom.arcs.flatMap(p => p.map(makeRing));
+    if (geom.type === 'GeometryCollection') return geom.geometries.flatMap(extract);
+    return [];
+  };
+  return extract(topo.objects.countries);
+}
+
 // ─── Flat Map ─────────────────────────────────────────────────────────────────
 function FlatMap({ trips }) {
   const canvasRef = useRef(null);
@@ -211,12 +274,13 @@ function FlatMap({ trips }) {
   const arcProgressRef = useRef({});
   const timeRef = useRef(0);
   const [landRings, setLandRings] = useState([]);
+  const [countryRings, setCountryRings] = useState([]);
 
   useEffect(() => {
     fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json")
-      .then((r) => r.json())
-      .then((topo) => setLandRings(decodeTopo(topo)))
-      .catch(() => {});
+      .then(r => r.json()).then(topo => setLandRings(decodeTopo(topo))).catch(() => {});
+    fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json")
+      .then(r => r.json()).then(topo => setCountryRings(decodeCountries(topo))).catch(() => {});
   }, []);
 
   // Equirectangular projection: lon/lat → canvas x/y
@@ -241,40 +305,92 @@ function FlatMap({ trips }) {
     ctx.fillStyle = "#c8dce8";
     ctx.fillRect(0, 0, W, H);
 
-    // Land polygons
+    // Land fill
     landRings.forEach((ring) => {
       ctx.beginPath();
       ring.forEach(([lon, lat], i) => {
         const { x, y } = project(lat, lon, W, H);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.closePath();
-      ctx.fillStyle = "#d4dfc8";
+      ctx.fillStyle = "#d8e4c8";
       ctx.fill();
-      ctx.strokeStyle = "#b8c8a8";
-      ctx.lineWidth = 0.3;
+    });
+
+    // Country borders
+    countryRings.forEach((ring) => {
+      ctx.beginPath();
+      ring.forEach(([lon, lat], i) => {
+        const { x, y } = project(lat, lon, W, H);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "rgba(160,170,140,0.7)";
+      ctx.lineWidth = 0.5;
       ctx.stroke();
     });
 
-    // Grid
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    ctx.lineWidth = 0.5;
+    // Grid lines
     for (let lon = -180; lon <= 180; lon += 30) {
       const x = ((lon + 180) / 360) * W;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H);
+      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 0.5; ctx.stroke();
     }
     for (let lat = -90; lat <= 90; lat += 30) {
       const y = ((90 - lat) / 180) * H;
-      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.25)";
-      ctx.lineWidth = lat === 0 ? 0.8 : 0.5;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y);
+      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.18)";
+      ctx.lineWidth = lat === 0 ? 1 : 0.5; ctx.stroke();
     }
 
+    // Tropic lines (Cancer & Capricorne)
+    [23.5, -23.5].forEach(lat => {
+      const y = ((90 - lat) / 180) * H;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y);
+      ctx.strokeStyle = "rgba(200,180,100,0.25)"; ctx.lineWidth = 0.8;
+      ctx.setLineDash([4, 6]); ctx.stroke(); ctx.setLineDash([]);
+    });
+
     // Border
-    ctx.strokeStyle = "rgba(60,60,70,0.3)";
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(60,60,70,0.25)"; ctx.lineWidth = 1;
     ctx.strokeRect(0, 0, W, H);
+
+    // ── Océans & mers labels ──
+    const scale = Math.min(W, H) / 400;
+    OCEAN_LABELS.forEach(({ lat, lon, label, size }) => {
+      const { x, y } = project(lat, lon, W, H);
+      ctx.save();
+      ctx.font = `italic ${Math.round(size * scale + 7)}px Georgia, serif`;
+      ctx.fillStyle = "rgba(80,110,140,0.65)";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x, y);
+      ctx.restore();
+    });
+
+    SEA_LABELS.forEach(({ lat, lon, label, size }) => {
+      if (!label) return;
+      const { x, y } = project(lat, lon, W, H);
+      ctx.save();
+      ctx.font = `italic ${Math.round(size * scale + 5)}px Georgia, serif`;
+      ctx.fillStyle = "rgba(80,110,140,0.55)";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x, y);
+      ctx.restore();
+    });
+
+    // ── Continents labels ──
+    CONTINENT_LABELS.forEach(({ lat, lon, label, size }) => {
+      const { x, y } = project(lat, lon, W, H);
+      ctx.save();
+      ctx.font = `bold ${Math.round(size * scale + 6)}px 'JetBrains Mono', monospace`;
+      ctx.fillStyle = "rgba(60,70,50,0.45)";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.letterSpacing = "2px";
+      ctx.fillText(label, x, y);
+      ctx.restore();
+    });
 
     // ── Flight arcs ──
     trips.forEach((trip, i) => {
@@ -367,7 +483,7 @@ function FlatMap({ trips }) {
       ctx.fillStyle = "#18181b";
       ctx.fillText(city.iata, x + 5, y - 4);
     });
-  }, [trips, project, landRings]);
+  }, [trips, project, landRings, countryRings]);
 
   useEffect(() => { arcProgressRef.current = {}; }, [trips.length]);
 
