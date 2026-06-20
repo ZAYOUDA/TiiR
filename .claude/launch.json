@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flightlog",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "C:\\00-Projects\\GitHub\\TiiiR"],
+      "port": 5173
+    }
+  ]
+}
