@@ -283,10 +283,18 @@ function FlatMap({ trips }) {
       .then(r => r.json()).then(topo => setCountryRings(decodeCountries(topo))).catch(() => {});
   }, []);
 
-  // Equirectangular projection: lon/lat → canvas x/y
-  const project = useCallback((lat, lon, W, H) => {
-    const x = ((lon + 180) / 360) * W;
-    const y = ((90 - lat) / 180) * H;
+  // Equirectangular projection with 2:1 aspect ratio letterboxed in canvas
+  const getMapBounds = useCallback((W, H) => {
+    const mapW = Math.min(W, H * 2);
+    const mapH = mapW / 2;
+    const ox = (W - mapW) / 2;
+    const oy = (H - mapH) / 2;
+    return { mapW, mapH, ox, oy };
+  }, []);
+
+  const project = useCallback((lat, lon, mapW, mapH, ox, oy) => {
+    const x = ox + ((lon + 180) / 360) * mapW;
+    const y = oy + ((90 - lat) / 180) * mapH;
     return { x, y };
   }, []);
 
@@ -299,100 +307,110 @@ function FlatMap({ trips }) {
     const H = canvas.height / dpr;
     timeRef.current += 0.016;
 
-    ctx.clearRect(0, 0, W, H);
+    const { mapW, mapH, ox, oy } = getMapBounds(W, H);
+    const isMobile = W < 500;
+    const pr = (lat, lon) => project(lat, lon, mapW, mapH, ox, oy);
 
-    // Ocean background
-    ctx.fillStyle = "#c8dce8";
+    // Background (outside map area)
+    ctx.fillStyle = "#e8edf2";
     ctx.fillRect(0, 0, W, H);
 
-    // Land fill
-    landRings.forEach((ring) => {
+    // Ocean
+    ctx.fillStyle = "#b8d0e0";
+    ctx.fillRect(ox, oy, mapW, mapH);
+
+    // Clip to map area
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, mapW, mapH);
+    ctx.clip();
+
+    // Land
+    landRings.forEach(ring => {
       ctx.beginPath();
       ring.forEach(([lon, lat], i) => {
-        const { x, y } = project(lat, lon, W, H);
+        const { x, y } = pr(lat, lon);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.closePath();
-      ctx.fillStyle = "#d8e4c8";
+      ctx.fillStyle = "#dde8cc";
       ctx.fill();
     });
 
     // Country borders
-    countryRings.forEach((ring) => {
+    countryRings.forEach(ring => {
       ctx.beginPath();
       ring.forEach(([lon, lat], i) => {
-        const { x, y } = project(lat, lon, W, H);
+        const { x, y } = pr(lat, lon);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
-      ctx.strokeStyle = "rgba(160,170,140,0.7)";
+      ctx.strokeStyle = "rgba(150,165,130,0.8)";
       ctx.lineWidth = 0.5;
       ctx.stroke();
     });
 
-    // Grid lines
+    // Grid
     for (let lon = -180; lon <= 180; lon += 30) {
-      const x = ((lon + 180) / 360) * W;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H);
-      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 0.5; ctx.stroke();
+      const { x } = pr(0, lon);
+      ctx.beginPath(); ctx.moveTo(x, oy); ctx.lineTo(x, oy + mapH);
+      ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 0.5; ctx.stroke();
     }
-    for (let lat = -90; lat <= 90; lat += 30) {
-      const y = ((90 - lat) / 180) * H;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y);
-      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.18)";
+    for (let lat = -60; lat <= 90; lat += 30) {
+      const { y } = pr(lat, 0);
+      ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + mapW, y);
+      ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.2)";
       ctx.lineWidth = lat === 0 ? 1 : 0.5; ctx.stroke();
     }
-
-    // Tropic lines (Cancer & Capricorne)
+    // Tropiques
     [23.5, -23.5].forEach(lat => {
-      const y = ((90 - lat) / 180) * H;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y);
-      ctx.strokeStyle = "rgba(200,180,100,0.25)"; ctx.lineWidth = 0.8;
-      ctx.setLineDash([4, 6]); ctx.stroke(); ctx.setLineDash([]);
+      const { y } = pr(lat, 0);
+      ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + mapW, y);
+      ctx.strokeStyle = "rgba(200,175,90,0.3)"; ctx.lineWidth = 0.8;
+      ctx.setLineDash([5, 7]); ctx.stroke(); ctx.setLineDash([]);
     });
 
-    // Border
-    ctx.strokeStyle = "rgba(60,60,70,0.25)"; ctx.lineWidth = 1;
-    ctx.strokeRect(0, 0, W, H);
-
-    // ── Océans & mers labels ──
-    const scale = Math.min(W, H) / 400;
+    // ── Océans ──
+    const fs = mapW / 900; // font scale relative to map width
     OCEAN_LABELS.forEach(({ lat, lon, label, size }) => {
-      const { x, y } = project(lat, lon, W, H);
-      ctx.save();
-      ctx.font = `italic ${Math.round(size * scale + 7)}px Georgia, serif`;
-      ctx.fillStyle = "rgba(80,110,140,0.65)";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, x, y);
-      ctx.restore();
-    });
-
-    SEA_LABELS.forEach(({ lat, lon, label, size }) => {
       if (!label) return;
-      const { x, y } = project(lat, lon, W, H);
+      const { x, y } = pr(lat, lon);
+      const fs2 = Math.max(8, Math.round(size * fs * 10));
       ctx.save();
-      ctx.font = `italic ${Math.round(size * scale + 5)}px Georgia, serif`;
-      ctx.fillStyle = "rgba(80,110,140,0.55)";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
+      ctx.font = `italic ${fs2}px Georgia, serif`;
+      ctx.fillStyle = "rgba(60,100,140,0.6)";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(label, x, y);
       ctx.restore();
     });
 
-    // ── Continents labels ──
+    // ── Mers (desktop seulement) ──
+    if (!isMobile) {
+      SEA_LABELS.forEach(({ lat, lon, label, size }) => {
+        if (!label) return;
+        const { x, y } = pr(lat, lon);
+        const fs2 = Math.max(7, Math.round(size * fs * 10));
+        ctx.save();
+        ctx.font = `italic ${fs2}px Georgia, serif`;
+        ctx.fillStyle = "rgba(60,100,140,0.5)";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(label, x, y);
+        ctx.restore();
+      });
+    }
+
+    // ── Continents ──
     CONTINENT_LABELS.forEach(({ lat, lon, label, size }) => {
-      const { x, y } = project(lat, lon, W, H);
+      const { x, y } = pr(lat, lon);
+      const fs2 = Math.max(9, Math.round(size * fs * 10));
       ctx.save();
-      ctx.font = `bold ${Math.round(size * scale + 6)}px 'JetBrains Mono', monospace`;
-      ctx.fillStyle = "rgba(60,70,50,0.45)";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.letterSpacing = "2px";
+      ctx.font = `bold ${fs2}px 'JetBrains Mono', monospace`;
+      ctx.fillStyle = "rgba(50,65,40,0.4)";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(label, x, y);
       ctx.restore();
     });
 
-    // ── Flight arcs ──
+    // ── Arcs de vol ──
     trips.forEach((trip, i) => {
       const from = CITIES[trip.from];
       const to = CITIES[trip.to];
@@ -403,87 +421,70 @@ function FlatMap({ trips }) {
       const progress = arcProgressRef.current[i];
       const isPlane = trip.type !== "train";
 
-      const p1 = project(from.lat, from.lon, W, H);
-      const p2 = project(to.lat, to.lon, W, H);
-
-      // Control point: arc goes upward (toward north = lower y)
+      const p1 = pr(from.lat, from.lon);
+      const p2 = pr(to.lat, to.lon);
       const mx = (p1.x + p2.x) / 2;
       const my = (p1.y + p2.y) / 2;
       const dist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
       const cpx = mx;
-      const cpy = my - dist * 0.35;
+      const cpy = my - dist * 0.4;
 
-      // Draw partial arc up to progress
-      ctx.beginPath();
       const steps = 60;
       const maxStep = Math.floor(steps * progress);
-      for (let s = 0; s <= maxStep; s++) {
-        const t = s / steps;
-        // Quadratic bezier point
-        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
-        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
-        if (s === 0) ctx.moveTo(bx, by);
-        else ctx.lineTo(bx, by);
-      }
-      ctx.strokeStyle = isPlane ? "rgba(24,24,27,0.15)" : "rgba(100,100,120,0.15)";
-      ctx.lineWidth = 5;
-      ctx.stroke();
+      const drawCurve = (lw, color) => {
+        ctx.beginPath();
+        for (let s = 0; s <= maxStep; s++) {
+          const t = s / steps;
+          const bx = (1-t)**2*p1.x + 2*(1-t)*t*cpx + t**2*p2.x;
+          const by = (1-t)**2*p1.y + 2*(1-t)*t*cpy + t**2*p2.y;
+          if (s === 0) ctx.moveTo(bx, by); else ctx.lineTo(bx, by);
+        }
+        ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+      };
+      drawCurve(5, isPlane ? "rgba(24,24,27,0.12)" : "rgba(100,100,120,0.12)");
+      drawCurve(1.8, isPlane ? "#18181b" : "#71717a");
 
-      ctx.beginPath();
-      for (let s = 0; s <= maxStep; s++) {
-        const t = s / steps;
-        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
-        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
-        if (s === 0) ctx.moveTo(bx, by);
-        else ctx.lineTo(bx, by);
-      }
-      ctx.strokeStyle = isPlane ? "#18181b" : "#71717a";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Traveling dot
       if (progress < 1) {
         const t = progress;
-        const bx = (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * cpx + t ** 2 * p2.x;
-        const by = (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * cpy + t ** 2 * p2.y;
-        ctx.beginPath();
-        ctx.arc(bx, by, 3, 0, Math.PI * 2);
-        ctx.fillStyle = "#18181b";
-        ctx.fill();
+        const bx = (1-t)**2*p1.x + 2*(1-t)*t*cpx + t**2*p2.x;
+        const by = (1-t)**2*p1.y + 2*(1-t)*t*cpy + t**2*p2.y;
+        ctx.beginPath(); ctx.arc(bx, by, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "#18181b"; ctx.fill();
       }
     });
 
-    // ── City dots ──
+    // ── Villes ──
     const citySet = new Set();
-    trips.forEach((t) => { citySet.add(t.from); citySet.add(t.to); });
-    citySet.forEach((name) => {
+    trips.forEach(t => { citySet.add(t.from); citySet.add(t.to); });
+    citySet.forEach(name => {
       const city = CITIES[name];
       if (!city) return;
-      const { x, y } = project(city.lat, city.lon, W, H);
+      const { x, y } = pr(city.lat, city.lon);
       const pulse = 0.5 + 0.5 * Math.sin(timeRef.current * 2 + city.lat);
 
       ctx.beginPath();
-      ctx.arc(x, y, 3 + pulse * 2.5, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(24,24,27,${0.2 * pulse})`;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.arc(x, y, 3 + pulse * 2, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(24,24,27,${0.18 * pulse})`; ctx.lineWidth = 1; ctx.stroke();
 
-      ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = "#18181b";
-      ctx.fill();
-      ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#18181b"; ctx.fill();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.stroke();
 
-      ctx.font = "bold 9px 'JetBrains Mono', monospace";
+      const labelSize = Math.max(8, Math.round(10 * fs));
+      ctx.font = `bold ${labelSize}px 'JetBrains Mono', monospace`;
       ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
       ctx.strokeText(city.iata, x + 5, y - 4);
       ctx.fillStyle = "#18181b";
       ctx.fillText(city.iata, x + 5, y - 4);
     });
-  }, [trips, project, landRings, countryRings]);
+
+    ctx.restore();
+
+    // Bordure de la carte
+    ctx.strokeStyle = "rgba(60,80,100,0.3)"; ctx.lineWidth = 1;
+    ctx.strokeRect(ox, oy, mapW, mapH);
+  }, [trips, project, getMapBounds, landRings, countryRings]);
 
   useEffect(() => { arcProgressRef.current = {}; }, [trips.length]);
 
@@ -820,12 +821,13 @@ export default function App() {
 
         {/* Globe */}
         {tab === "globe" && (
-          <div className="card-in" style={{ flex: 1, minHeight: 340, height: "60vw", maxHeight: 500, background: "rgba(24,24,27,0.02)", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden", position: "relative" }}>
+          <div className="card-in" style={{ width: "100%", position: "relative", paddingBottom: "50%", background: "#e8edf2", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden" }}>
+            <div style={{ position: "absolute", inset: 0 }}>
             <FlatMap trips={trips} />
             <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 12, fontSize: 8, color: "#a8a8b0", letterSpacing: 1 }}>
-              <span>GLISSE</span>
               <span style={{ color: "#18181b" }}>▬ VOL</span>
               <span style={{ color: "#71717a" }}>▬ TRAIN</span>
+            </div>
             </div>
           </div>
         )}
