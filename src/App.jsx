@@ -208,8 +208,8 @@ const CITIES = {
 function GlobeCanvas({ trips }) {
   const canvasRef = useRef(null);
   const rotRef = useRef({
-    x: 0.28,
-    y: 0.5,
+    x: 0,
+    y: -1.0,
     dragging: false,
     lastX: 0,
     lastY: 0,
