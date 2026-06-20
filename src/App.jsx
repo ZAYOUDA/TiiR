@@ -616,41 +616,43 @@ function FlatMap({ trips }) {
       const from = CITIES[trip.from];
       const to = CITIES[trip.to];
       if (!from || !to) return;
+
+      // Animation : nouvelle trajectoire part de 0, existante part de 1
       if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
       if (arcProgressRef.current[i] < 1)
-        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.006);
+        arcProgressRef.current[i] = Math.min(1, arcProgressRef.current[i] + 0.025);
       const progress = arcProgressRef.current[i];
+
       const isPlane = trip.type !== "train";
-
       const gcPts = greatCirclePoints(from.lat, from.lon, to.lat, to.lon, 80);
-      const maxIdx = Math.floor(gcPts.length * progress);
+      const maxIdx = Math.floor((gcPts.length - 1) * progress);
 
-      const drawGC = (lw, color) => {
+      const drawSegments = (lw, color) => {
+        let drawing = false;
         ctx.beginPath();
-        let started = false;
-        for (let s = 0; s <= maxIdx && s < gcPts.length; s++) {
+        for (let s = 0; s <= maxIdx; s++) {
           const { x, y } = pr(gcPts[s].lat, gcPts[s].lon);
-          // Break line if longitude wraps around the dateline
-          if (s > 0) {
-            const prevLon = gcPts[s - 1].lon;
-            if (Math.abs(gcPts[s].lon - prevLon) > 180) {
-              ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
-              ctx.beginPath(); started = false;
-            }
+          if (s > 0 && Math.abs(gcPts[s].lon - gcPts[s-1].lon) > 180) {
+            ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+            ctx.beginPath(); drawing = false;
           }
-          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+          if (!drawing) { ctx.moveTo(x, y); drawing = true; }
+          else ctx.lineTo(x, y);
         }
         ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
       };
 
-      drawGC(5, isPlane ? "rgba(24,24,27,0.1)" : "rgba(100,100,120,0.1)");
-      drawGC(1.8, isPlane ? "#18181b" : "#71717a");
+      // Ombre
+      drawSegments(isPlane ? 4 : 3, isPlane ? "rgba(24,24,27,0.08)" : "rgba(100,80,180,0.08)");
+      // Ligne principale
+      drawSegments(isPlane ? 2 : 1.5, isPlane ? "rgba(24,24,27,0.75)" : "rgba(100,80,180,0.7)");
 
-      // Plane dot animation
-      if (progress < 1 && maxIdx < gcPts.length) {
+      // Point avion en cours d'animation
+      if (progress < 1) {
         const { x, y } = pr(gcPts[maxIdx].lat, gcPts[maxIdx].lon);
-        ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = "#18181b"; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = isPlane ? "#18181b" : "#6450b4"; ctx.fill();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke();
       }
     });
 
@@ -687,7 +689,16 @@ function FlatMap({ trips }) {
     ctx.strokeRect(ox, oy, mapW, mapH);
   }, [trips, project, getMapBounds, landRings, countryRings]);
 
-  useEffect(() => { arcProgressRef.current = {}; }, [trips.length]);
+  const prevLenRef = useRef(0);
+  useEffect(() => {
+    const prevLen = prevLenRef.current;
+    // Complete existing arcs instantly, animate only newly added ones
+    trips.forEach((_, i) => {
+      if (i < prevLen) arcProgressRef.current[i] = 1;
+      else if (arcProgressRef.current[i] === undefined) arcProgressRef.current[i] = 0;
+    });
+    prevLenRef.current = trips.length;
+  }, [trips.length]);
 
   // Animation loop
   useEffect(() => {
