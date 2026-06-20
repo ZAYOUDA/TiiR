@@ -276,6 +276,13 @@ function FlatMap({ trips }) {
   const [landRings, setLandRings] = useState([]);
   const [countryRings, setCountryRings] = useState([]);
 
+  // Zoom / pan state (refs to avoid re-render)
+  const zoomRef = useRef(1);
+  const panXRef = useRef(0);
+  const panYRef = useRef(0);
+  const dragRef = useRef(null); // { startX, startY, startPanX, startPanY }
+  const pinchRef = useRef(null); // { dist, zoom, panX, panY }
+
   useEffect(() => {
     fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json")
       .then(r => r.json()).then(topo => setLandRings(decodeTopo(topo))).catch(() => {});
@@ -283,14 +290,25 @@ function FlatMap({ trips }) {
       .then(r => r.json()).then(topo => setCountryRings(decodeCountries(topo))).catch(() => {});
   }, []);
 
-  // Equirectangular projection with 2:1 aspect ratio letterboxed in canvas
-  const getMapBounds = useCallback((W, H) => {
+  // Base map bounds at zoom=1 (2:1 ratio, fills canvas)
+  const getBaseBounds = useCallback((W, H) => {
     const mapW = Math.min(W, H * 2);
     const mapH = mapW / 2;
     const ox = (W - mapW) / 2;
     const oy = (H - mapH) / 2;
     return { mapW, mapH, ox, oy };
   }, []);
+
+  // Zoomed bounds
+  const getMapBounds = useCallback((W, H) => {
+    const { mapW: bW, mapH: bH, ox: bOx, oy: bOy } = getBaseBounds(W, H);
+    const z = zoomRef.current;
+    const mapW = bW * z;
+    const mapH = bH * z;
+    const ox = bOx + (bW - mapW) / 2 + panXRef.current;
+    const oy = bOy + (bH - mapH) / 2 + panYRef.current;
+    return { mapW, mapH, ox, oy };
+  }, [getBaseBounds]);
 
   const project = useCallback((lat, lon, mapW, mapH, ox, oy) => {
     const x = ox + ((lon + 180) / 360) * mapW;
@@ -311,19 +329,17 @@ function FlatMap({ trips }) {
     const isMobile = W < 500;
     const pr = (lat, lon) => project(lat, lon, mapW, mapH, ox, oy);
 
-    // Background (outside map area)
+    // Background
     ctx.fillStyle = "#e8edf2";
     ctx.fillRect(0, 0, W, H);
 
-    // Ocean
-    ctx.fillStyle = "#b8d0e0";
-    ctx.fillRect(ox, oy, mapW, mapH);
-
-    // Clip to map area
+    // Ocean (clipped to canvas)
     ctx.save();
     ctx.beginPath();
-    ctx.rect(ox, oy, mapW, mapH);
+    ctx.rect(0, 0, W, H);
     ctx.clip();
+    ctx.fillStyle = "#b8d0e0";
+    ctx.fillRect(ox, oy, mapW, mapH);
 
     // Land
     landRings.forEach(ring => {
@@ -345,7 +361,7 @@ function FlatMap({ trips }) {
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.strokeStyle = "rgba(150,165,130,0.8)";
-      ctx.lineWidth = 0.5;
+      ctx.lineWidth = 0.5 / zoomRef.current;
       ctx.stroke();
     });
 
@@ -361,7 +377,6 @@ function FlatMap({ trips }) {
       ctx.strokeStyle = lat === 0 ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.2)";
       ctx.lineWidth = lat === 0 ? 1 : 0.5; ctx.stroke();
     }
-    // Tropiques
     [23.5, -23.5].forEach(lat => {
       const { y } = pr(lat, 0);
       ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + mapW, y);
@@ -369,11 +384,13 @@ function FlatMap({ trips }) {
       ctx.setLineDash([5, 7]); ctx.stroke(); ctx.setLineDash([]);
     });
 
-    // ── Océans ──
-    const fs = mapW / 900; // font scale relative to map width
+    // ── Labels (taille adaptée au zoom) ──
+    const fs = mapW / 900;
+
     OCEAN_LABELS.forEach(({ lat, lon, label, size }) => {
       if (!label) return;
       const { x, y } = pr(lat, lon);
+      if (x < -50 || x > W + 50 || y < -20 || y > H + 20) return;
       const fs2 = Math.max(6, Math.round(size * fs));
       ctx.save();
       ctx.font = `italic ${fs2}px Georgia, serif`;
@@ -383,11 +400,11 @@ function FlatMap({ trips }) {
       ctx.restore();
     });
 
-    // ── Mers (desktop seulement) ──
-    if (!isMobile) {
+    if (!isMobile || zoomRef.current > 1.5) {
       SEA_LABELS.forEach(({ lat, lon, label, size }) => {
         if (!label) return;
         const { x, y } = pr(lat, lon);
+        if (x < -50 || x > W + 50 || y < -20 || y > H + 20) return;
         const fs2 = Math.max(5, Math.round(size * fs));
         ctx.save();
         ctx.font = `italic ${fs2}px Georgia, serif`;
@@ -398,9 +415,9 @@ function FlatMap({ trips }) {
       });
     }
 
-    // ── Continents ──
     CONTINENT_LABELS.forEach(({ lat, lon, label, size }) => {
       const { x, y } = pr(lat, lon);
+      if (x < -80 || x > W + 80 || y < -30 || y > H + 30) return;
       const fs2 = Math.max(7, Math.round(size * fs));
       ctx.save();
       ctx.font = `bold ${fs2}px 'JetBrains Mono', monospace`;
@@ -481,13 +498,14 @@ function FlatMap({ trips }) {
 
     ctx.restore();
 
-    // Bordure de la carte
-    ctx.strokeStyle = "rgba(60,80,100,0.3)"; ctx.lineWidth = 1;
+    // Bordure
+    ctx.strokeStyle = "rgba(60,80,100,0.2)"; ctx.lineWidth = 1;
     ctx.strokeRect(ox, oy, mapW, mapH);
   }, [trips, project, getMapBounds, landRings, countryRings]);
 
   useEffect(() => { arcProgressRef.current = {}; }, [trips.length]);
 
+  // Animation loop
   useEffect(() => {
     const loop = () => {
       draw();
@@ -497,6 +515,7 @@ function FlatMap({ trips }) {
     return () => cancelAnimationFrame(animRef.current);
   }, [draw]);
 
+  // Resize
   useEffect(() => {
     const resize = () => {
       const c = canvasRef.current;
@@ -516,6 +535,135 @@ function FlatMap({ trips }) {
     const t = setTimeout(resize, 200);
     return () => { window.removeEventListener("resize", resize); clearTimeout(t); };
   }, []);
+
+  // Zoom helper (zoom toward a point cx,cy in canvas coords)
+  const applyZoom = useCallback((newZoom, cx, cy) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = canvas._dpr || 1;
+    const W = canvas.width / dpr;
+    const H = canvas.height / dpr;
+    const { mapW: bW, mapH: bH, ox: bOx, oy: bOy } = (() => {
+      const mapW = Math.min(W, H * 2);
+      const mapH = mapW / 2;
+      return { mapW, mapH, ox: (W - mapW) / 2, oy: (H - mapH) / 2 };
+    })();
+
+    const oldZ = zoomRef.current;
+    const clampedZ = Math.max(1, Math.min(20, newZoom));
+    // Adjust pan so the point under cursor stays fixed
+    const scale = clampedZ / oldZ;
+    panXRef.current = cx - bOx - bW / 2 - (cx - bOx - bW / 2 - panXRef.current) * scale;
+    panYRef.current = cy - bOy - bH / 2 - (cy - bOy - bH / 2 - panYRef.current) * scale;
+    zoomRef.current = clampedZ;
+    clampPan(W, H, clampedZ, bW, bH);
+  }, []);
+
+  const clampPan = (W, H, z, bW, bH) => {
+    const maxPanX = (bW * (z - 1)) / 2;
+    const maxPanY = (bH * (z - 1)) / 2;
+    panXRef.current = Math.max(-maxPanX, Math.min(maxPanX, panXRef.current));
+    panYRef.current = Math.max(-maxPanY, Math.min(maxPanY, panYRef.current));
+  };
+
+  // Mouse wheel zoom
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      applyZoom(zoomRef.current * delta, cx, cy);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [applyZoom]);
+
+  // Mouse drag
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onDown = (e) => {
+      dragRef.current = { startX: e.clientX, startY: e.clientY, startPanX: panXRef.current, startPanY: panYRef.current };
+      canvas.style.cursor = "grabbing";
+    };
+    const onMove = (e) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      const dpr = canvas._dpr || 1;
+      const W = canvas.width / dpr;
+      const H = canvas.height / dpr;
+      const bW = Math.min(W, H * 2);
+      const bH = bW / 2;
+      panXRef.current = dragRef.current.startPanX + dx;
+      panYRef.current = dragRef.current.startPanY + dy;
+      clampPan(W, H, zoomRef.current, bW, bH);
+    };
+    const onUp = () => { dragRef.current = null; canvas.style.cursor = "grab"; };
+    canvas.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    canvas.style.cursor = "grab";
+    return () => {
+      canvas.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  // Touch: drag + pinch
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dist2 = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const onTouchStart = (e) => {
+      if (e.touches.length === 1) {
+        dragRef.current = { startX: e.touches[0].clientX, startY: e.touches[0].clientY, startPanX: panXRef.current, startPanY: panYRef.current };
+        pinchRef.current = null;
+      } else if (e.touches.length === 2) {
+        dragRef.current = null;
+        pinchRef.current = { dist: dist2(e.touches[0], e.touches[1]), zoom: zoomRef.current, panX: panXRef.current, panY: panYRef.current };
+      }
+    };
+    const onTouchMove = (e) => {
+      e.preventDefault();
+      const dpr = canvas._dpr || 1;
+      const W = canvas.width / dpr;
+      const H = canvas.height / dpr;
+      const bW = Math.min(W, H * 2);
+      const bH = bW / 2;
+      if (e.touches.length === 1 && dragRef.current) {
+        const dx = e.touches[0].clientX - dragRef.current.startX;
+        const dy = e.touches[0].clientY - dragRef.current.startY;
+        panXRef.current = dragRef.current.startPanX + dx;
+        panYRef.current = dragRef.current.startPanY + dy;
+        clampPan(W, H, zoomRef.current, bW, bH);
+      } else if (e.touches.length === 2 && pinchRef.current) {
+        const newDist = dist2(e.touches[0], e.touches[1]);
+        const scale = newDist / pinchRef.current.dist;
+        const newZoom = Math.max(1, Math.min(20, pinchRef.current.zoom * scale));
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - canvas.getBoundingClientRect().left;
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - canvas.getBoundingClientRect().top;
+        applyZoom(newZoom, cx, cy);
+      }
+    };
+    const onTouchEnd = (e) => {
+      if (e.touches.length < 2) pinchRef.current = null;
+      if (e.touches.length === 0) dragRef.current = null;
+    };
+    canvas.addEventListener("touchstart", onTouchStart, { passive: true });
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+    canvas.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => {
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [applyZoom]);
 
   return (
     <canvas
@@ -817,17 +965,18 @@ export default function App() {
       </div>
 
       {/* Content */}
-      <div style={{ flex: 1, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ flex: 1, minHeight: 0, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
 
         {/* Globe */}
         {tab === "globe" && (
-          <div className="card-in" style={{ width: "100%", position: "relative", paddingBottom: "50%", background: "#e8edf2", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden" }}>
-            <div style={{ position: "absolute", inset: 0 }}>
+          <div className="card-in" style={{ width: "100%", flex: 1, minHeight: 0, position: "relative", background: "#e8edf2", borderRadius: 12, border: "1px solid rgba(24,24,27,0.1)", overflow: "hidden" }}>
             <FlatMap trips={trips} />
-            <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 12, fontSize: 8, color: "#a8a8b0", letterSpacing: 1 }}>
+            <div style={{ position: "absolute", bottom: 10, left: 12, display: "flex", gap: 12, fontSize: 8, color: "#a8a8b0", letterSpacing: 1, pointerEvents: "none" }}>
               <span style={{ color: "#18181b" }}>▬ VOL</span>
               <span style={{ color: "#71717a" }}>▬ TRAIN</span>
             </div>
+            <div style={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", gap: 4, pointerEvents: "none" }}>
+              <div style={{ background: "rgba(255,255,255,0.7)", borderRadius: 4, padding: "3px 6px", fontSize: 8, color: "#71717a", letterSpacing: 1 }}>⊕ pinch / scroll</div>
             </div>
           </div>
         )}
